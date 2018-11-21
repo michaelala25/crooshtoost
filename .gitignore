@@ -1,0 +1,5 @@
+# Byte-compiled
+*/__pycache__
+
+# The root test folder is just for personal use
+test.py
