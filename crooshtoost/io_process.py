@@ -9,8 +9,9 @@ import multiprocessing as mp
 
 class IOProcess(mp.Process):
     
-    def __init__(self):
+    def __init__(self, message_queue):
         super().__init__()
+        self.message_queue = message_queue
         
     def run(self):
         pass
