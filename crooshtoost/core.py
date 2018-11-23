@@ -2,12 +2,19 @@
 core.py exposes a public interface through the CrooshToost object.
 """
 
-from .io_process import IOProcess
+from .flask_process import FlaskProcess
 from .model_process import ModelProcess
 
 from multiprocessing import Queue
 
 class CrooshToost:
+
+    """
+    initial_settings=None,
+    data_downloader=None,
+    data_processor=None,
+    train_setup=None
+    """
 
     def __init__(self):
         pass
@@ -18,14 +25,10 @@ class CrooshToost:
     def _setup_processes(self):
         self.message_queue = Queue()
 
-        self.io_process = IOProcess(self.message_queue)
+        self.io_process = FlaskProcess(self.message_queue)
         self.model_process = ModelProcess(self.message_queue)
 
-    def run(self,
-            initial_settings=None,
-            data_downloader=None,
-            data_processor=None,
-            train_setup=None):
+    def run(self):
         self._setup_processes()
 
         self.io_process.start()

@@ -1,4 +1,3 @@
-from .main import (
-    set_model,
-    run
+from .core import (
+    CrooshToost
 )
