@@ -4,9 +4,9 @@ class Globals:
     __INSTANCE__ = None
     
     def __new__(cls):
-        if cls.__INSTANCE__:
-            return cls.__INSTANCE__
-        return object.__new__(cls)
+        if not cls.__INSTANCE__:
+            cls.__INSTANCE__ = object.__new__(cls)
+        return cls.__INSTANCE__
 
 GLOBALS = Globals()
 
