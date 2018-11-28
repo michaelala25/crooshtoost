@@ -199,9 +199,9 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
                     vg.add_node(param_name, next_context, relation_type)
 
                 if learn_from_doc:
-                    _learn_kwargs_from_doc(attr.__doc__, vocab)
+                    _learn_kwargs_from_doc(attr.__doc__, vg)
         else:
-            _extract_vocab_recursive(attr, vocab, next_context, depth+1)
+            _extract_vocab_recursive(attr, vg, next_context, depth+1)
 
 def _learn_kwargs_from_doc(docstr, vocab):
     # TIME FOR SOME NLP :O
