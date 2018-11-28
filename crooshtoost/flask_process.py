@@ -38,20 +38,8 @@ class FlaskProcess(Process):
         self.twilio_client = None
         self.flask_app = None
 
-    def _sms_reply(self):
-        # This is where all the good stuff goes :D
-        message = request.form["Body"]
-
-        response = MessagingResponse()
-        response.message("test message")
-        return str(response)
-
     def _expose_localhost(self):
         self.public_url = self.tunneling_method.expose(self.port)
-
-    def _make_routes(self):
-        self.flask_app = Flask(self.name)
-        self.flask_app.route("/sms", methods=["GET", "POST"])(self._sms_reply)
         
     def _initialize(self):
         self._expose_localhost()
@@ -76,6 +64,18 @@ class FlaskProcess(Process):
         phone_number.update(sms_url=self.public_url + "/sms")
 
         self._make_routes()
+
+    def _make_routes(self):
+        self.flask_app = Flask(self.name)
+        self.flask_app.route("/sms", methods=["GET", "POST"])(self._sms_reply)
+
+    def _sms_reply(self):
+        # This is where all the good stuff goes :D
+        message = request.form["Body"]
+
+        response = MessagingResponse()
+        response.message("test message")
+        return str(response)
 
     def run(self):
         self._initialize()
