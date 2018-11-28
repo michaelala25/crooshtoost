@@ -20,7 +20,7 @@ This can include parameter names, attribute names, method names, method argument
 # or commands matching noun-phrases and intent extracted from the user input. They will also
 # help to structure the execution of the command itself.
 
-from .vocab_graph import VocabGraph, WordRelations
+from vocab_graph import VocabGraph, WordRelations
 
 from platform import python_version
 
@@ -62,11 +62,8 @@ _BASE_TYPES = {
     types.CodeType,
     types.CoroutineType,
     types.FrameType,
-    types.FunctionType,
     types.GeneratorType,
-    types.LambdaType,
     types.MappingProxyType,
-    types.MethodType,
     types.ModuleType, # probably should explore modules?
     types.SimpleNamespace,
     types.TracebackType,
@@ -154,7 +151,7 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
             next_context = vg.add_node(name, context, relation_type)
 
         attr_type = type(attr)
-        if _is_base_type(attr_type) and attr is not None:
+        if (_is_base_type(attr_type) or _is_function_type(attr_type)) and attr is not None:
             # Note: when entering an iterable to search for new items, we actually increment
             # the depth by 2, since we're entering both the iterable attribute itself _and_
             # it's items. 
@@ -163,16 +160,25 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
                     if _is_private_name(name) or _is_magic_name(name):
                         continue
                     # We build a node for the keyword itself built off the current context
-                    kw_context = vg.add_node(key, next_context, WordRelations.IS_ELEM_OF_DICT)
+                    kw_context = vg.add_node(key, next_context, WordRelations.IS_ELEM_OF_D)
+
+                    if _is_base_type(type(value)):
+                        continue
+
                     _extract_vocab_recursive(value, vg, kw_context, depth+2)
 
             elif attr_type == list or attr_type == tuple:
                 for i, item in enumerate(attr):
                     # This isn't quite right, how should this be handled?
-                    elem_context = vg.add_node(i, next_context, WordRelations.IS_ELEM_OF_LIST)
+                    elem_context = vg.add_node(i, next_context, WordRelations.IS_ELEM_OF_L)
+
+                    if _is_base_type(type(item)):
+                        continue
+                    
                     _extract_vocab_recursive(item, vg, elem_context, depth+2)
             
             elif attr_type == str and attr:
+                # Should we really be doing this?
                 vg.add_node(attr, next_context, WordRelations.IS_VALUE_OF)
 
             elif _is_function_type(attr_type):
@@ -247,29 +253,76 @@ class VocabExtractor:
 if __name__ == "__main__":
     # quick testing utilities
 
-    from pprint import pprint
-    from keras.models import Model
-    from keras.layers import Input, Dense, Softmax
-    from keras.callbacks import LearningRateScheduler, TensorBoard, LambdaCallback
-    from keras.optimizers import SGD
+    def test_keras():
+        from pprint import pprint
+        from keras.models import Model
+        from keras.layers import Input, Dense, Softmax
+        from keras.callbacks import LearningRateScheduler, TensorBoard, LambdaCallback
+        from keras.optimizers import SGD
 
-    x = inputs = Input(shape=(10,))
-    x = Dense(40)(x)
-    x = Dense(10)(x)
-    x = Softmax()(x)
+        x = inputs = Input(shape=(10,))
+        x = Dense(40)(x)
+        x = Dense(10)(x)
+        x = Softmax()(x)
 
-    model = Model(inputs=inputs, outputs=x)
+        model = Model(inputs=inputs, outputs=x)
 
-    model.callbacks = [
-        LearningRateScheduler(schedule = lambda epoch: 1/(1 + epoch)**.55),
-        TensorBoard(),
-        LambdaCallback(on_epoch_begin=lambda epoch, logs={}: None)
-    ]
+        model.callbacks = [
+            LearningRateScheduler(schedule = lambda epoch: 1/(1 + epoch)**.55),
+            TensorBoard(),
+            LambdaCallback(on_epoch_begin=lambda epoch, logs={}: None)
+        ]
 
-    sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
-    model.compile(loss='mse', optimizer=sgd)
+        sgd = SGD(lr=0.01, decay=1e-6, momentum=0.9, nesterov=True)
+        model.compile(loss='mse', optimizer=sgd)
 
-    vocab_extractor = VocabExtractor()
-    vocab_extractor.extract_initial_vocab(model)
+        vocab_extractor = VocabExtractor()
+        vocab_extractor.extract_initial_vocab(model)
 
-    pprint(vocab_extractor.vocab)
+        pprint(vocab_extractor.vocab)
+    
+    def test_vg():
+        class A:
+            def __init__(self, attr1, attr2):
+                self.attr1 = attr1
+                self.attr2 = attr2
+
+            def method_1(self):
+                pass
+
+            def method_2(self, arg1, arg2):
+                pass
+
+        class B:
+            def __init__(self):
+                self.property = "Hey!"
+            
+            def method_1(self, thing):
+                pass
+
+        class C:
+            def __init__(self):
+                self.dict = {
+                    "Entry 1" : 1,
+                    "Entry 2" : 2
+                }
+                self.list = [D(), E()]
+
+                self.function = lambda hey, you, *args, **kwargs: None
+
+        class D:
+            cls_thing = ":O"
+    
+        class E:
+            def __init__(self):
+                self.a = A(1, 2)
+
+        a = A(B(), C())
+
+        from pprint import pprint
+        vg = VocabGraph([])
+        root_node = vg.add_node("a", None, None)
+        _extract_vocab_recursive(a, vg, root_node)
+        pprint(vg._graph_by_values)
+
+    test_vg()

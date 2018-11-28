@@ -5,43 +5,45 @@ by some "relation". The possible relations are given by the "WordRelations" enum
 """
 
 from collections import defaultdict
-from enum import Enum
 
-class WordRelations(Enum):
-    UNKNOWN = 0
+class _WordRelation:
+    def __init__(self, name, opposite=None):
+        self.name = name
+        self.opposite = opposite
 
-    IS_ATTR_OF = 1
-    HAS_ATTR = 2
+    def __repr__(self):
+        return self.name
+    __str__ = __repr__
 
-    IS_METHOD_OF = 3
-    HAS_METHOD = 4
+    def __eq__(self, other):
+        return isinstance(other, self.__class__) and self.name == other.name
 
-    IS_ARG_OF = 5
-    HAS_ARG = 6
+def opposite_relations(a, b):
+    r1 = _WordRelation(a)
+    r2 = _WordRelation(b)
 
-    IS_KWARG_OF = 7
-    HAS_KWARG = 8
+    r1.opposite = r2
+    r2.opposite = r1
+    return r1, r2
 
-    IS_VARG_OF = 9
-    HAS_VARG = 10
+class WordRelations:
+    """
+    An 'Enum' (not really) containing WordRelation types.
+    """
+    UNKNOWN, _ = opposite_relations("UNKNOWN", "UNKNOWN")
 
-    IS_VKWARG_OF = 11
-    HAS_VKWARG = 12
+    IS_ATTR_OF, HAS_ATTR     = opposite_relations("IS_ATTR_OF", "HAS_ATTR")
+    IS_METHOD_OF, HAS_METHOD = opposite_relations("IS_METHOD_OF", "HAS_METHOD")
+    IS_ARG_OF, HAS_ARG       = opposite_relations("IS_ARG_OF", "HAS_ARG")
+    IS_KWARG_OF, HAS_KWARG   = opposite_relations("IS_KWARG_OF", "HAS_KWARG")
+    IS_VARG_OF, HAS_VARG     = opposite_relations("IS_VARG_OF", "HAS_VARG")
+    IS_VKWARG_OF, HAS_VKWARG = opposite_relations("IS_VKWARG_OF", "HAS_VKWARG")
+    IS_ELEM_OF_L, HAS_L_ELEM = opposite_relations("IS_ELEM_OF_L", "HAS_L_ELEM")
+    IS_ELEM_OF_D, HAS_D_ELEM = opposite_relations("IS_ELEM_OF_D", "HAS_D_ELEM")
+    IS_VALUE_OF, HAS_VALUE   = opposite_relations("IS_VALUE_OF", "HAS_VALUE")
 
-    IS_ELEM_OF_LIST = 13
-    HAS_LIST_ELEM = 14
-
-    IS_ELEM_OF_DICT = 15
-    HAS_DICT_ELEM = 16
-
-    IS_VALUE_OF = 17
-    HAS_VALUE = 18
-
-    IS_KERAS_LAYER_OF = 19
-    HAS_KERAS_LAYER = 20
-
-    IS_KERAS_CALLBACK_OF = 21
-    HAS_KERAS_CALLBACK = 22
+    IS_KERAS_LAYER_OF, HAS_KERAS_LAYER       = opposite_relations("IS_KERAS_LAYER_OF", "HAS_KERAS_LAYER")
+    IS_KERAS_CALLBACK_OF, HAS_KERAS_CALLBACK = opposite_relations("IS_KERAS_CALLBACK_OF", "HAS_KERAS_CALLBACK")
 
 class WordNode:
     @property
@@ -69,6 +71,17 @@ class WordNode:
                 connection.second_node.value == out_name: 
                 to_remove.add(connection)
         self._connections -= to_remove
+
+    def __repr__(self):
+        if (self.connections):
+            self_str = "Node(%s) -> [" % self.value
+            self_str += ", ".join("%s : Node(%s)" % (c.relation, c.second_node.value) for c in self._connections)
+            self_str += "]"
+            return self_str
+        else:
+            return "Node(%s)" % self.value
+
+    __str__ = __repr__
 
 class WordEdge:
 
