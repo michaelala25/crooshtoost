@@ -20,7 +20,12 @@ This can include parameter names, attribute names, method names, method argument
 # or commands matching noun-phrases and intent extracted from the user input. They will also
 # help to structure the execution of the command itself.
 
-from vocab_graph import VocabGraph, WordRelations
+# TODO: Figure out how "possible" it is to automatically monitor mutable objects for changes in
+#       their __dict__.
+#       Interesting Fact: most objects' __dict__'s are *not* readonly ;)
+
+from .vocab_graph import VocabGraph, WordRelations
+from ..globals import GLOBALS
 
 from platform import python_version
 
@@ -87,6 +92,9 @@ _FUNCTION_TYPES = {
 # Maximum recursion depth of objects to explore when looking for vocabulary
 _MAX_RECURSION_DEPTH = 2
 
+# Maximum length of an iterable
+_MAX_ITERABLE_LEN = 50
+
 def _is_base_type(t):
     if t in _BASE_TYPES: # Quick Check
         return True
@@ -122,7 +130,7 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
     # If an object is a function type, inspect its arguments. If the object has **kwargs,
     # we can try to guess some of the parameters by looking at the object's __doc__.
     
-    if depth == _MAX_RECURSION_DEPTH:
+    if depth >= _MAX_RECURSION_DEPTH:
         return
 
     obj_dir = dir(obj)
@@ -134,7 +142,7 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
         if _is_private_name(name) and name[1:] in obj_dir:
             # Check here for private names with public counterparts
             continue
-
+            
         attr = None
         try:
             attr = getattr(obj, name)
@@ -145,40 +153,51 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
         finally:
             # TODO: We should really also store a list of "ignore" types, for which we don't add the name.
             relation_type = WordRelations.IS_ATTR_OF # Default
-            if attr is not None and isinstance(attr, _method_type):
-                # If attr is a method, change the default relation type.
-                relation_type = WordRelations.IS_METHOD_OF
+            if attr is not None:
+                if isinstance(attr, _method_type):
+                    relation_type = WordRelations.IS_METHOD_OF
+                elif isinstance(attr, _function_type):
+                    relation_type = WordRelations.IS_FUNC_ATTR_OF
+                elif isinstance(attr, _lambda_type):
+                    relation_type = WordRelations.IS_LAMBDA_ATTR_OF
             next_context = vg.add_node(name, context, relation_type)
+
+        # attrs_to_watch is a set of tuples of (attribtue name, attribute type).
+        attrs_to_watch = set()
 
         attr_type = type(attr)
         if (_is_base_type(attr_type) or _is_function_type(attr_type)) and attr is not None:
+
+            # TODO: What happens if this list gets added to or removed from?
+
             # Note: when entering an iterable to search for new items, we actually increment
             # the depth by 2, since we're entering both the iterable attribute itself _and_
             # it's items. 
-            if attr_type == dict:
+            if issubclass(attr_type, dict):
                 for key, value in attr.items():
                     if _is_private_name(name) or _is_magic_name(name):
+                        continue
+
+                    if _is_base_type(type(value)):
                         continue
                     # We build a node for the keyword itself built off the current context
                     kw_context = vg.add_node(key, next_context, WordRelations.IS_ELEM_OF_D)
 
-                    if _is_base_type(type(value)):
-                        continue
-
                     _extract_vocab_recursive(value, vg, kw_context, depth+2)
 
-            elif attr_type == list or attr_type == tuple:
+            elif issubclass(attr_type, (list, tuple)) and len(attr) <= _MAX_ITERABLE_LEN:
                 for i, item in enumerate(attr):
-                    # This isn't quite right, how should this be handled?
-                    elem_context = vg.add_node(i, next_context, WordRelations.IS_ELEM_OF_L)
-
                     if _is_base_type(type(item)):
                         continue
-                    
-                    _extract_vocab_recursive(item, vg, elem_context, depth+2)
+
+                    elem_context = vg.add_node("%s[%i]" % (name, i), next_context, WordRelations.IS_ELEM_OF_L)
+                    _extract_vocab_recursive(item, vg, elem_context, depth + 2)
             
             elif attr_type == str and attr:
-                # Should we really be doing this?
+                # The reason we do this is so that we can pick up on things like object names or keywords.
+                # For example, if we asked "What is the learning rate of model CNN1?", it wouldn't be enough
+                # to know that 'model' has a parameter 'name', we would also need to know that that specific
+                # model's 'name' is equal to "CNN1" (or close enough).
                 vg.add_node(attr, next_context, WordRelations.IS_VALUE_OF)
 
             elif _is_function_type(attr_type):
@@ -189,6 +208,8 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
 
                 learn_from_doc = False
                 for param_name, param in parameters.items():
+                    # If the name is "args" or "kwargs", then typically the list of valid keyword argument
+                    # names can be found somewhere in the function's docstring (assuming it's well documented).
                     if (param_name == "args" and param.kind == inspect.Parameter.VAR_POSITIONAL) or \
                        (param_name == "kwargs" and param.kind == inspect.Parameter.VAR_KEYWORD):
                         learn_from_doc = True
@@ -207,12 +228,48 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
                 if learn_from_doc:
                     _learn_kwargs_from_doc(attr.__doc__, vg)
         else:
+            # If this attribute isn't one of the base type cases above, 
+            # continue searching through it's __dict__ for vocab.
+            attrs_to_watch.add(name)
             _extract_vocab_recursive(attr, vg, next_context, depth+1)
 
-def _learn_kwargs_from_doc(docstr, vocab):
+        # Now the fun stuff. We inject our own __getattribute__, __setattr__,
+        # and __delattr__ into each object to dynamically update the vocab
+        # graph.
+        #
+        # This does introduce significant overhead, and so can be turned off
+        # with the global attribute ENABLE_DYNAMIC_VOCAB_UPDATES.
+        if not GLOBALS.ENABLE_DYNAMIC_VOCAB_UPDATES:
+            continue
+
+        _inject_dynamic_vocab_updates(obj, vg, attrs_to_watch)
+
+def _learn_kwargs_from_doc(docstr, vg):
     # TIME FOR SOME NLP :O
     if not docstr:
         return
+
+def _inject_dynamic_vocab_updates(obj, vg, attrs):
+    # Inject code into each of obj's attributes to dynamically watch changes to the object's __dict__.
+    #
+    # attr is expected to be an iterable (namely a set) of tuples of (attribute name, attribute type).
+    
+    if not attrs:
+        return
+    
+    # __slots__ indicates which attributes an object has access to. If __slots__ is set and
+    # __slots__ doesn't contain __dict__, then the object's list of accessible attributes
+    # won't change, meaning we don't need to worry about dynamically updating the vocab graph.
+    if hasattr(obj, "__slots__") and "__dict__" not in obj.__slots__:
+        return
+
+    for name, attr_type in attrs:
+        if issubclass(attr_type, dict):
+            pass
+        elif issubclass(attr_type, (list, tuple)):
+            pass
+        else:
+            pass
 
 class VocabExtractor:
     """
