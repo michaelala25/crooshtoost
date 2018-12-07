@@ -72,20 +72,24 @@ class WordNode:
 
     def __init__(self, value):
         self.value = value
+        # The connections are directed. If a <-> b, then a has a connection to b 
+        # and b has a connection to a, rather than both objects having both connnections.
         self._connections = set()
 
     def add_connection(self, node, relation):
         self._connections.add(WordEdge(self, node, relation))
         node._connections.add(WordEdge(node, self, relation.opposite))
 
-    def remove_connections(self, node):
-        """
-        Remove any connections between this node and the given node.
-        This will also remove any connections from the given node to
-        the first node.
-        """
-        self._remove_connections(node)
-        node._remove_connections(self)
+    def _reset_connections(self):
+        self._connections = set()
+
+    def get_connections_to_value(self, value, relation=None):
+        connections = []
+        for connection in self._connections: 
+            if (relation is None or connection.relation == relation) and \
+                connection.second_node.value == value:
+                connections.append(connection)
+        return connections
 
     def _remove_connections(self, node):
         # Possible for multiple connections to the same node with different relation types
@@ -95,7 +99,19 @@ class WordNode:
                 connections_to_remove.add(connection)
         self._connections -= connections_to_remove
 
-    def remove_connections_by_name(self, node_name, relation=None):
+    def remove_connections(self, connections):
+        self._connections -= set(connections)
+
+    def remove_connections_to_node(self, node):
+        """
+        Remove any connections between this node and the given node.
+        This will also remove any connections from the given node to
+        the first node.
+        """
+        self._remove_connections(node)
+        node._remove_connections(self)
+
+    def remove_connections_by_value(self, node_name, relation=None):
         connections_to_remove = set()
         for connection in self._connections:
             if (relation is None or connection.relation == relation) and \
@@ -115,6 +131,7 @@ class WordNode:
 
     __str__ = __repr__
 
+# TODO: Just a namedtuple?
 class WordEdge:
     """
     WordEdge represents a directed connection of type `relation` connecting `first` to `second`.
@@ -158,9 +175,53 @@ class VocabGraph:
 
         return node
 
-    def remove_node_by_value(self, value, context, recursive=False):
+    def remove_node_by_value(self, value, context, recursive=True, initial_relation=None):
         """
-        Remove a node from the graph
+        Remove a node with the given `value` attached to the given `context` node
+        from the vocab graph.
+
+        If `recursive=True`, recursively remove all subsequent out-nodes connected to the
+        first removed node.
+
+        This will fail silently if no nodes with the given `value` (and connected with the
+        given `initial_relation` if not None) are found connected to `context`.
         """
-        if value in self._graph_by_values:
-            del self._graph_by_values[value]
+        connections = context.get_connections_to_value(value, relation=initial_relation)
+        if not connections:
+            return
+        
+        # Remove connections to the initial node...
+        context.remove_connections(connections)
+
+        if not recursive:
+            return
+
+        # ...then continue by removing the deeper nodes from "memory".
+        # We remove the nodes themselves from self._graph_by_values, and
+        # remove their connections.
+
+        to_remove = {c.second_node for c in connections}
+        while to_remove:
+            next_node = to_remove.pop()
+
+            # Try-except block is faster than an if statement when it is _unlikely_ for
+            # an exception to be raised in the try block, which in this case it is (why
+            # would there be a duplicate in the vocab graph, unless I'm not understanding
+            # something about this program.)
+            try:
+                self._graph_by_values[next_node.value].remove(next_node)
+            except ValueError:
+                # The only way we can encounter a node in this process that _isn't_ in the
+                # graph is if there's somehow a cycle in the graph, which _should_ mean
+                # we've already processed the node and removed all it's connections as well.
+                # In this case, if we were to continue removing it's connected nodes we would
+                # cause an infinite loop.
+                continue
+
+            for connection in next_node.connections:
+                to_remove.add(connection.second_node)
+            
+            next_node._reset_connections()
+
+            
+            

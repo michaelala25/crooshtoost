@@ -95,6 +95,9 @@ _MAX_RECURSION_DEPTH = 2
 # Maximum length of an iterable
 _MAX_ITERABLE_LEN = 50
 
+# The name format for items found in literals
+_ITERABLE_ITEM_NAME_FORMAT = "%s_Item"
+
 def _is_base_type(t):
     if t in _BASE_TYPES: # Quick Check
         return True
@@ -164,7 +167,7 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
             # Note: when entering an iterable to search for new items, we actually increment
             # the depth by 2, since we're entering both the iterable attribute itself _and_
             # it's items. 
-            if issubclass(attr_type, dict):
+            if issubclass(attr_type, dict) and len(attr) <= _MAX_ITERABLE_LEN:
                 for key, value in attr.items():
                     if _is_private_name(name) or _is_magic_name(name):
                         continue
@@ -177,11 +180,17 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
                     _extract_vocab_recursive(value, vg, kw_context, depth+2)
 
             elif issubclass(attr_type, (list, tuple)) and len(attr) <= _MAX_ITERABLE_LEN:
+                # TODO: This is REALLY fucky. The name given to items in a list is "list_name[index]". What if
+                # the index of the item changes? I think a few things have to happen. First, lists and tuples
+                # should be handled differently, since tuples are immutable (but can still be appended to
+                # apparently with +). Second, the node name given to items found in the iterable should _not_
+                # be dependent on the item's position in the iterable (unless, _maybe_ for tuples).
                 for i, item in enumerate(attr):
                     if _is_base_type(type(item)):
                         continue
 
-                    elem_context = vg.add_node("%s[%i]" % (name, i), next_context, WordRelations.IS_ELEM_OF_L)
+                    node_name = _ITERABLE_ITEM_NAME_FORMAT % name
+                    elem_context = vg.add_node(node_name, next_context, WordRelations.IS_ELEM_OF_L)
                     _extract_vocab_recursive(item, vg, elem_context, depth + 2)
             
             elif attr_type == str and attr:
@@ -241,9 +250,17 @@ def _learn_kwargs_from_doc(docstr, vg):
     if not docstr:
         return
 
+class _DynamicVocabWatcher:
+    pass
+
 def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
-    # Inject code into obj to dynamically watch changes to the object's __dict__.
+    """Inject code into obj to dynamically watch changes to the object's __dict__."""
     # WARNING: This code is ugly and magical.
+
+    if isinstance(obj, _DynamicVocabWatcher):
+        # Already injected dynamic vocab watching into the object.
+        return
+
     if not attrs:
         # Nothing to watch :/
         return
@@ -257,14 +274,10 @@ def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
         # __setattr__.
         return
 
-    NoAttribute = object()
-
+    # Notes
+    # =====
     # IMPORTANT NOTE: Inside the new _getattr, _setattr_, _delattr, we *can't* use
     # hasattr, getattr, setattr, or delattr, as this will create an infinite loop.
-
-    _getattr_old = obj.__getattr__ if hasattr(obj, "__getattr__") else None
-    _setattr_old = obj.__setattr__
-    _delattr_old = obj.__delattr__
 
     # If the object has __getattr__, then this will be called ONLY when the attribute
     # being retrieved is _not_ already an attribute of the object. Hence, if we're
@@ -274,55 +287,99 @@ def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
     # does the _retrieval_ of an attribute change the object's dict?), however there is a chance
     # the class has a __getattr__ override that does something magical like automatically returning
     # None regardless of whether or not the attribute is defined.
-        
+
+    object_getattr = obj.__getattribute__ # This is the most basic "getattr" that doesn't involve any magic
+
+    NoAttribute, NoItem = object(), object() # Unique identifiers
+
+    _getattr_old = obj.__getattr__ if hasattr(obj, "__getattr__") else None
+    _setattr_old = obj.__setattr__
+    _delattr_old = obj.__delattr__
+    
     def _getattr(self, name):
         # TODO: Do stuff in here.
         return _getattr_old(name)
 
     def _setattr(self, name, value):
-        watching = object.__getattribute__(self, "__watching__")
-
         try:
-            retrieved = _getattr_old(name)
+            retrieved = object_getattr(self, name)
         except:
-            pass
-
-        _setattr_old(name, value)
-
-        if not _is_base_type(type(value)):
-            if name in watching and not issubclass(type(retrieved), type(value)):
-                vg.remove_node_by_value(name, context, recursive=True)
+            retrieved = NoAttribute
+        watching = object_getattr(self, "__watching__")
+        val_type = type(value)
+        if retrieved == NoAttribute and not _is_base_type(val_type):
             watching.add(name)
-            vg.add_node(name, context, WordRelations._get_attr_rel(type(value)))
-        else:
-            watching.remove(name)
+            vg.add_node(name, context, WordRelations._get_attr_rel(val_type))
+        elif name in watching:
+            if type(retrieved) != val_type:
+                vg.remove_node_by_value(name, context, recursive=True)
+            if not _is_base_type(val_type):
+                vg.add_node(name, context, WordRelations._get_attr_rel(val_type))
+            else:
+                watching.remove(name)
+        _setattr_old(name, value)
             
     def _delattr(self, name):
         _delattr_old(name)
         watching = object.__getattribute__(self, "__watching__")
         if name in watching:
-            # Remove it from the vocab graph, and recursively remove all nodes beneath it.
             watching.remove(name)
-            vg.remove_node_by_value(name, context, recursive=True)
+            vg.remove_node_by_value(name, context)
 
-    _new__dict__ = {
+    _setitem = _delitem = None
+    if isinstance(obj, (dict, list, tuple)):
+        if isinstance(obj, (list, tuple)):
+            node_name = _ITERABLE_ITEM_NAME_FORMAT % context.value
+            new_node_format = lambda item: node_name
+            word_relation = WordRelations.IS_ELEM_OF_L
+        else:
+            new_node_format = lambda item: item
+            word_relation = WordRelations.IS_ELEM_OF_D
+        _getitem_old = obj.__getitem__
+        _setitem_old = obj.__setitem__
+        _delitem_old = obj.__delitem__
+        def _setitem(self, item, value):
+            try:
+                retrieved = _getitem_old(item)
+            except:
+                retrieved = NoItem
+            val_type = type(value)
+            if retrieved == NoItem and not _is_base_type(val_type):
+                vg.add_node(new_node_format(item), context, word_relation)
+            else:
+                if type(retrieved) != val_type:
+                    vg.remove_node_by_value(
+                        new_node_format(item), context, 
+                        recursive=True, 
+                        initial_relation=word_relation)
+                if not _is_base_type(val_type):
+                    vg.add_node(new_node_format(item), context, word_relation)
+            _setitem_old(item, value)
+
+        def _delitem(self, item):
+            _delitem_old(item)
+            vg.remove_node_by_value(
+                new_node_format(item), context, 
+                recursive=True, 
+                initial_relation=word_relation)
+
+    new__dict__ = {
             "__watching__" : attrs,
             "__getattr__"  : _getattr,
             "__setattr__"  : _setattr,
             "__delattr__"  : _delattr
         }
-
-    if isinstance(obj, dict):
-        pass
-    elif isinstance(obj, (list, tuple)):
-        pass
+    if _setitem:
+        new__dict__["__setitem__"] = _setitem
+    if _delitem:
+        new__dict__["__delitem__"] = _delitem
 
     try:
         # Magic
         obj.__class__ = type(
             "_%s" % obj.__class__.__name__,
-            (obj.__class__, ),
-            _new__dict__
+            (obj.__class__, _DynamicVocabWatcher),
+            new__dict__
         )
     except:
         # Sometimes an object's metaclass prevents it from being subclassed, preventing the
