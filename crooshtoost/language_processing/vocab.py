@@ -134,7 +134,6 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
     if depth >= _MAX_RECURSION_DEPTH or _is_base_type(type(obj)):
         return
 
-    attrs_to_watch = set()
     obj_dir = dir(obj)
     for name in obj_dir:
         if _is_magic_name(name):
@@ -228,8 +227,6 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
         else:
             # If this attribute isn't one of the base type cases above, 
             # continue searching through it's __dict__ for vocab.
-            if attr is not None:
-                attrs_to_watch.add(name)
             _extract_vocab_recursive(attr, vg, next_context, depth+1)
 
     # Now the fun stuff. We inject our own __getattribute__, __setattr__,
@@ -241,7 +238,7 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
     if not GLOBALS.ENABLE_DYNAMIC_VOCAB_UPDATES:
         return
 
-    _inject_dynamic_vocab_updates(obj, vg, context, attrs_to_watch)
+    _inject_dynamic_vocab_updates(obj, vg, context)
 
 def _learn_kwargs_from_doc(docstr, vg):
     # TIME FOR SOME NLP :O
@@ -255,26 +252,22 @@ class _DynamicVocabWatcher:
     """
     pass
 
-def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
+def _inject_dynamic_vocab_updates(obj, vg, context):
     """Inject code into obj to dynamically watch changes to the object's __dict__."""
     # WARNING: This code is ugly and magical.
 
     if isinstance(obj, _DynamicVocabWatcher):
         # Already injected dynamic vocab watching into the object.
         return
-
-    if not attrs:
-        # Nothing to watch :/
-        return
     
     # __slots__ indicates which attributes an object has access to. If __slots__ is set and
     # __slots__ doesn't contain __dict__, then the object's list of accessible attributes
     # won't change, meaning we don't need to worry about dynamically updating the vocab graph.
-    if hasattr(obj, "__slots__") and "__dict__" not in obj.__slots__:
-        # TODO: even if the object has __slots__ without __dict__, setting an attribute to a
-        # new value still warrants updating the vocab graph, meaning we still have to override
-        # __setattr__.
-        return
+    #
+    # Even if the object has __slots__ without __dict__, setting an attribute to a new 
+    # value still warrants updating the vocab graph, meaning we still have to override
+    # __setattr__.
+    has_immutable_slots = hasattr(obj, "__slots__") and "__dict__" not in obj.__slots__
 
     # Notes
     # =====
@@ -302,31 +295,49 @@ def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
         # TODO: Do stuff in here.
         return _getattr_old(name)
 
-    def _setattr(self, name, value):
-        try:
+    if has_immutable_slots:
+        # If the object has immutable slots we can speed this up a ton by avoiding the
+        # unnecessary try-except block.
+        def _setattr(self, name, value):
             retrieved = object_getattr(self, name)
-        except:
-            retrieved = NoAttribute
-        watching = object_getattr(self, "__watching__")
-        val_type = type(value)
-        if retrieved == NoAttribute and not _is_base_type(val_type):
-            watching.add(name)
-            vg.add_node(name, context, WordRelations._get_attr_rel(val_type))
-        elif name in watching:
-            if type(retrieved) != val_type:
-                vg.remove_node_by_value(name, context, recursive=True)
-            if not _is_base_type(val_type):
+            if type(retrieved) != type(value):
+                vg.remove_node_by_value(
+                    name, context, 
+                    recursive=True,
+                    initial_relation=WordRelations._get_attr_rel(type(retrieved)))
+                if not _is_base_type(type(value)):
+                    vg.add_node(name, context, WordRelations._get_attr_rel(type(value)))
+            _setattr_old(name, value)
+    else:
+        def _setattr(self, name, value):
+            try:
+                retrieved = object_getattr(self, name)
+            except:
+                retrieved = NoAttribute
+            val_type = type(value)
+            if retrieved == NoAttribute and not _is_base_type(val_type):
                 vg.add_node(name, context, WordRelations._get_attr_rel(val_type))
-            else:
-                watching.remove(name)
-        _setattr_old(name, value)
+            elif type(retrieved) != val_type:
+                vg.remove_node_by_value(
+                    name, context, 
+                    recursive=True, 
+                    initial_relation=WordRelations._get_attr_rel(type(retrieved)))
+                if not _is_base_type(val_type):
+                    vg.add_node(name, context, WordRelations._get_attr_rel(val_type))
+            _setattr_old(name, value)
             
     def _delattr(self, name):
+        try:
+            retrieved = object_getattr(self, name)
+        except AttributeError:
+            # if we can't retrieve the object then we can't delete it either
+            # so just call delattr and throw the error regardless.
+            pass
         _delattr_old(name)
-        watching = object.__getattribute__(self, "__watching__")
-        if name in watching:
-            watching.remove(name)
-            vg.remove_node_by_value(name, context)
+        vg.remove_node_by_value(
+            name, context, 
+            recursive=True, 
+            initial_relation=WordRelations._get_attr_rel(type(retrieved)))
 
     _setitem = _delitem = None
     if isinstance(obj, (dict, list, tuple)):
@@ -366,7 +377,6 @@ def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
                 initial_relation=word_relation)
 
     new__dict__ = {
-            "__watching__" : attrs,
             "__getattr__"  : _getattr,
             "__setattr__"  : _setattr,
             "__delattr__"  : _delattr
