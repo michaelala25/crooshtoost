@@ -69,7 +69,7 @@ _BASE_TYPES = {
     types.FrameType,
     types.GeneratorType,
     types.MappingProxyType,
-    types.ModuleType, # probably should explore modules?
+    types.ModuleType, # TODO: probably should explore modules?
     types.SimpleNamespace,
     types.TracebackType,
     typing_MethodDescriptorType,
@@ -92,16 +92,14 @@ _FUNCTION_TYPES = {
 # Maximum recursion depth of objects to explore when looking for vocabulary
 _MAX_RECURSION_DEPTH = 2
 
-# Maximum length of an iterable
+# Maximum length of an iterable to explore
 _MAX_ITERABLE_LEN = 50
 
 # The name format for items found in literals
 _ITERABLE_ITEM_NAME_FORMAT = "%s_Item"
 
 def _is_base_type(t):
-    if t in _BASE_TYPES: # Quick Check
-        return True
-    return any(issubclass(t, x) for x in _BASE_TYPES)
+    return t in _BASE_TYPES or any(issubclass(t, x) for x in _BASE_TYPES)
 
 def _is_function_type(t):
     return any(issubclass(t, x) for x in _FUNCTION_TYPES)
@@ -111,7 +109,7 @@ def _is_magic_name(name):
 
 def _is_private_name(name):
     """
-    Check if `name` starts with a single underscore. Note that this will return _False_
+    Check if `name` starts with a single underscore. Note that this will return *False*
     for magic names like "__init__".
     """
     return name.startswith("_") and not _is_magic_name(name)
@@ -251,6 +249,10 @@ def _learn_kwargs_from_doc(docstr, vg):
         return
 
 class _DynamicVocabWatcher:
+    """
+    Empty base class for checking if we've already injected 
+    our dynamic vocab updating code into an object.
+    """
     pass
 
 def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
