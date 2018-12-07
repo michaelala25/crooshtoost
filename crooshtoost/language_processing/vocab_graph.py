@@ -5,6 +5,11 @@ by some "relation". The possible relations are given by the "WordRelations" enum
 """
 
 from collections import defaultdict
+import types
+
+_function_type = types.FunctionType
+_lambda_type = types.LambdaType
+_method_type = types.MethodType
 
 class _WordRelation:
     def __init__(self, name, opposite=None):
@@ -49,6 +54,16 @@ class WordRelations:
 
     IS_KERAS_LAYER_OF, HAS_KERAS_LAYER       = opposite_relations("IS_KERAS_LAYER_OF", "HAS_KERAS_LAYER")
     IS_KERAS_CALLBACK_OF, HAS_KERAS_CALLBACK = opposite_relations("IS_KERAS_CALLBACK_OF", "HAS_KERAS_CALLBACK")
+
+    @classmethod
+    def _get_attr_rel(cls, type):
+        if issubclass(type, _function_type):
+            return cls.IS_FUNC_ATTR_OF
+        elif issubclass(type, _method_type):
+            return cls.IS_METHOD_OF
+        elif issubclass(type, _lambda_type):
+            return cls.IS_LAMBDA_ATTR_OF
+        return cls.IS_ARG_OF
 
 class WordNode:
     @property
@@ -142,3 +157,10 @@ class VocabGraph:
         self._graph_by_values[value].add(node)
 
         return node
+
+    def remove_node_by_value(self, value, context, recursive=False):
+        """
+        Remove a node from the graph
+        """
+        if value in self._graph_by_values:
+            del self._graph_by_values[value]

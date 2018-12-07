@@ -130,9 +130,10 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
     # If an object is a function type, inspect its arguments. If the object has **kwargs,
     # we can try to guess some of the parameters by looking at the object's __doc__.
     
-    if depth >= _MAX_RECURSION_DEPTH:
+    if depth >= _MAX_RECURSION_DEPTH or _is_base_type(type(obj)):
         return
 
+    attrs_to_watch = set()
     obj_dir = dir(obj)
     for name in obj_dir:
         if _is_magic_name(name):
@@ -152,18 +153,8 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
             continue
         finally:
             # TODO: We should really also store a list of "ignore" types, for which we don't add the name.
-            relation_type = WordRelations.IS_ATTR_OF # Default
-            if attr is not None:
-                if isinstance(attr, _method_type):
-                    relation_type = WordRelations.IS_METHOD_OF
-                elif isinstance(attr, _function_type):
-                    relation_type = WordRelations.IS_FUNC_ATTR_OF
-                elif isinstance(attr, _lambda_type):
-                    relation_type = WordRelations.IS_LAMBDA_ATTR_OF
+            relation_type = WordRelations._get_attr_rel(attr_type)
             next_context = vg.add_node(name, context, relation_type)
-
-        # attrs_to_watch is a set of tuples of (attribtue name, attribute type).
-        attrs_to_watch = set()
 
         attr_type = type(attr)
         if (_is_base_type(attr_type) or _is_function_type(attr_type)) and attr is not None:
@@ -230,46 +221,116 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
         else:
             # If this attribute isn't one of the base type cases above, 
             # continue searching through it's __dict__ for vocab.
-            attrs_to_watch.add(name)
+            if attr is not None:
+                attrs_to_watch.add(name)
             _extract_vocab_recursive(attr, vg, next_context, depth+1)
 
-        # Now the fun stuff. We inject our own __getattribute__, __setattr__,
-        # and __delattr__ into each object to dynamically update the vocab
-        # graph.
-        #
-        # This does introduce significant overhead, and so can be turned off
-        # with the global attribute ENABLE_DYNAMIC_VOCAB_UPDATES.
-        if not GLOBALS.ENABLE_DYNAMIC_VOCAB_UPDATES:
-            continue
+    # Now the fun stuff. We inject our own __getattribute__, __setattr__,
+    # and __delattr__ into each object to dynamically update the vocab
+    # graph.
+    #
+    # This does introduce significant overhead, and so can be turned off
+    # with the global attribute ENABLE_DYNAMIC_VOCAB_UPDATES.
+    if not GLOBALS.ENABLE_DYNAMIC_VOCAB_UPDATES:
+        return
 
-        _inject_dynamic_vocab_updates(obj, vg, attrs_to_watch)
+    _inject_dynamic_vocab_updates(obj, vg, context, attrs_to_watch)
 
 def _learn_kwargs_from_doc(docstr, vg):
     # TIME FOR SOME NLP :O
     if not docstr:
         return
 
-def _inject_dynamic_vocab_updates(obj, vg, attrs):
-    # Inject code into each of obj's attributes to dynamically watch changes to the object's __dict__.
-    #
-    # attr is expected to be an iterable (namely a set) of tuples of (attribute name, attribute type).
-    
+def _inject_dynamic_vocab_updates(obj, vg, context, attrs):
+    # Inject code into obj to dynamically watch changes to the object's __dict__.
+    # WARNING: This code is ugly and magical.
     if not attrs:
+        # Nothing to watch :/
         return
     
     # __slots__ indicates which attributes an object has access to. If __slots__ is set and
     # __slots__ doesn't contain __dict__, then the object's list of accessible attributes
     # won't change, meaning we don't need to worry about dynamically updating the vocab graph.
     if hasattr(obj, "__slots__") and "__dict__" not in obj.__slots__:
+        # TODO: even if the object has __slots__ without __dict__, setting an attribute to a
+        # new value still warrants updating the vocab graph, meaning we still have to override
+        # __setattr__.
         return
 
-    for name, attr_type in attrs:
-        if issubclass(attr_type, dict):
+    NoAttribute = object()
+
+    # IMPORTANT NOTE: Inside the new _getattr, _setattr_, _delattr, we *can't* use
+    # hasattr, getattr, setattr, or delattr, as this will create an infinite loop.
+
+    _getattr_old = obj.__getattr__ if hasattr(obj, "__getattr__") else None
+    _setattr_old = obj.__setattr__
+    _delattr_old = obj.__delattr__
+
+    # If the object has __getattr__, then this will be called ONLY when the attribute
+    # being retrieved is _not_ already an attribute of the object. Hence, if we're
+    # inside __getattr__, then hasattr(self, name) is implicitly False.
+
+    # It may not seem like we have to worry about __getattr__ or __getattribute__ (since when
+    # does the _retrieval_ of an attribute change the object's dict?), however there is a chance
+    # the class has a __getattr__ override that does something magical like automatically returning
+    # None regardless of whether or not the attribute is defined.
+        
+    def _getattr(self, name):
+        # TODO: Do stuff in here.
+        return _getattr_old(name)
+
+    def _setattr(self, name, value):
+        watching = object.__getattribute__(self, "__watching__")
+
+        try:
+            retrieved = _getattr_old(name)
+        except:
             pass
-        elif issubclass(attr_type, (list, tuple)):
-            pass
+
+        _setattr_old(name, value)
+
+        if not _is_base_type(type(value)):
+            if name in watching and not issubclass(type(retrieved), type(value)):
+                vg.remove_node_by_value(name, context, recursive=True)
+            watching.add(name)
+            vg.add_node(name, context, WordRelations._get_attr_rel(type(value)))
         else:
-            pass
+            watching.remove(name)
+            
+    def _delattr(self, name):
+        _delattr_old(name)
+        watching = object.__getattribute__(self, "__watching__")
+        if name in watching:
+            # Remove it from the vocab graph, and recursively remove all nodes beneath it.
+            watching.remove(name)
+            vg.remove_node_by_value(name, context, recursive=True)
+
+    _new__dict__ = {
+            "__watching__" : attrs,
+            "__getattr__"  : _getattr,
+            "__setattr__"  : _setattr,
+            "__delattr__"  : _delattr
+        }
+
+    if isinstance(obj, dict):
+        pass
+    elif isinstance(obj, (list, tuple)):
+        pass
+
+    try:
+        # Magic
+        obj.__class__ = type(
+            "_%s" % obj.__class__.__name__,
+            (obj.__class__, ),
+            _new__dict__
+        )
+    except:
+        # Sometimes an object's metaclass prevents it from being subclassed, preventing the
+        # above trick from working. If this is the case, then maybe there's something else
+        # we can do?
+        
+        # TODO (low priority): Figure out if there's some other way to monitor updates dynamically.
+        return
 
 class VocabExtractor:
     """
@@ -290,6 +351,7 @@ class VocabExtractor:
 
         # List of the callbacks
         if (hasattr(model, "callbacks")):
+            # TODO: Ensure models managed by CT have a "callbacks" attribute.
             for callback in model.callbacks: # `model.callbacks` doesn't exist in keras!
                 self.vocab.add_node(
                     type(callback).__name__, model_node, WordRelations.IS_KERAS_CALLBACK_OF)
@@ -303,9 +365,20 @@ class VocabExtractor:
         maintained vocabulary along with the context(s) in which that vocabulary is found.
 
         The idea of this method is to "decorate" important function calls. So for example, instead of calling
-        model.fit(learning_rate=)
+
+        model.fit(x=inputs, y=outputs, batch_size=4, epochs=50, callbacks=callbacks)
+
+        you would call
+        model.fit(
+            vocab_extractor.follow(
+                {"x" : inputs, "y" : outputs, "batch_size" : 4, "epochs" : 50, "callbacks" : callbacks},
+                contexts=contexts))
         """
-        return dict
+
+        # TODO: Implement this properly
+        # TODO: Figure out what "contexts" should be, or if it's even necessary.
+        raise NotImplementedError
+        # return dict # Eventually
         
 if __name__ == "__main__":
     # quick testing utilities
