@@ -238,6 +238,9 @@ def _extract_vocab_recursive(obj, vg, context, depth=0):
     if not GLOBALS.ENABLE_DYNAMIC_VOCAB_UPDATES:
         return
 
+
+    # TODO: _inject_dynamic_vocab_updates should also be called on objects
+    # of types (dict, list, tuple), which are handled separately above
     _inject_dynamic_vocab_updates(obj, vg, context)
 
 def _learn_kwargs_from_doc(docstr, vg):
@@ -283,7 +286,7 @@ def _inject_dynamic_vocab_updates(obj, vg, context):
     # the class has a __getattr__ override that does something magical like automatically returning
     # None regardless of whether or not the attribute is defined.
 
-    object_getattr = obj.__getattribute__ # This is the most basic "getattr" that doesn't involve any magic
+    object_getattr = object.__getattribute__ # This is the most basic "getattr" that doesn't involve any magic
 
     NoAttribute, NoItem = object(), object() # Unique identifiers
 
